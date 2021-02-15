@@ -1,8 +1,12 @@
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 from threading import Thread
+
+import io
+from contextlib import redirect_stdout
 
 import numpy as np
 import torch
@@ -88,6 +92,16 @@ def test(data,
         dataloader = create_dataloader(path, imgsz, batch_size, model.stride.max(), opt, pad=0.5, rect=True,
                                        prefix=colorstr('test: ' if opt.task == 'test' else 'val: '))[0]
 
+    if save_json:
+        try:
+            anno_json = '../dataset/annotations/test.json'  # annotations json
+            with open(anno_json, 'r') as f: 
+                gt_dict = json.load(f)
+            fine_name2id = {x['file_name']: x['id'] for x in gt_dict['images']}
+        except Exception as e:
+            fine_name2id = {}
+            print(f'unable to load: {anno_json}')      
+
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
     names = {k: v for k, v in enumerate(model.names if hasattr(model, 'names') else model.module.names)}
@@ -159,12 +173,13 @@ def test(data,
             # Append to pycocotools JSON dictionary
             if save_json:
                 # [{"image_id": 42, "category_id": 18, "bbox": [258.15, 41.29, 348.26, 243.78], "score": 0.236}, ...
-                image_id = int(path.stem) if path.stem.isnumeric() else path.stem
+                image_relative_path = '/'.join(str(path).split('/')[-2:])
+                # image_id = int(path.stem) if path.stem.isnumeric() else path.stem
                 box = xyxy2xywh(predn[:, :4])  # xywh
                 box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
                 for p, b in zip(pred.tolist(), box.tolist()):
-                    jdict.append({'image_id': image_id,
-                                  'category_id': coco91class[int(p[5])] if is_coco else int(p[5]),
+                    jdict.append({'image_id': fine_name2id.get(image_relative_path, image_relative_path),
+                                  'category_id': coco91class[int(p[5])] if is_coco else int(p[5]) + 1,
                                   'bbox': [round(x, 3) for x in b],
                                   'score': round(p[4], 5)})
 
@@ -245,7 +260,6 @@ def test(data,
     # Save JSON
     if save_json and len(jdict):
         w = Path(weights[0] if isinstance(weights, list) else weights).stem if weights is not None else ''  # weights
-        anno_json = '../coco/annotations/instances_val2017.json'  # annotations json
         pred_json = str(save_dir / f"{w}_predictions.json")  # predictions json
         print('\nEvaluating pycocotools mAP... saving %s...' % pred_json)
         with open(pred_json, 'w') as f:
@@ -262,10 +276,38 @@ def test(data,
                 eval.params.imgIds = [int(Path(x).stem) for x in dataloader.dataset.img_files]  # image IDs to evaluate
             eval.evaluate()
             eval.accumulate()
-            eval.summarize()
+            f = io.StringIO()
+            with redirect_stdout(f):
+                eval.summarize()
+            out = f.getvalue()
+            coco_results = str(save_dir / f"coco_results.txt")
+            with open(coco_results, 'w') as f:
+                f.write(out)
             map, map50 = eval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
         except Exception as e:
             print(f'pycocotools unable to run: {e}')
+
+        try:  # https://arxiv.org/abs/2008.08115
+            from tidecv import TIDE, datasets
+            tide = TIDE()
+            tide.evaluate(datasets.COCO(anno_json), datasets.COCOResult(pred_json), mode=TIDE.BOX)
+            f = io.StringIO()
+            with redirect_stdout(f):
+                tide.summarize()
+            out = f.getvalue()
+            tide_results = str(save_dir / f"tide_results.txt")
+            with open(tide_results, 'w') as f:
+                f.write(out)
+            tide.plot(out_dir=save_dir)
+
+        except Exception as e:
+            print(f'tidecv unable to run: {e}')
+
+
+        # Copy artifacts
+        source = str(save_dir)
+        target = "../artifacts"
+        shutil.copytree(source, target, dirs_exist_ok=True)
 
     # Return results
     if not training:
