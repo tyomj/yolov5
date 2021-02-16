@@ -304,10 +304,20 @@ def test(data,
             print(f'tidecv unable to run: {e}')
 
 
-        # Copy artifacts
+        # Copy artifacts to dvc
         source = str(save_dir)
-        target = "../artifacts"
+        target = "../artifacts_full"
         shutil.copytree(source, target, dirs_exist_ok=True)
+
+        # main metrics to git
+        target_dir = "../artifacts_head"
+        os.makedirs(target_dir, exist_ok=True)
+        # results
+        for x in ["results", "coco_results", "tide_results"]:
+            source = os.path.join(str(save_dir), f"{x}.txt")
+            target = os.path.join(target_dir,  f"{x}.txt")
+            if os.path.isfile(source):
+                shutil.copy(source, target)
 
     # Return results
     if not training:
